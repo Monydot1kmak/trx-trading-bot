@@ -10,6 +10,7 @@ API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 BINANCE_ADDRESS = "0x0d55f41d0859febc41a55dc3ddeae77443837b8c"
 TRX_ADDRESS = "TPTzMmk1ZD8g4z7H6CiqCpYWb9xPRbpgbj"
+STARS_RATE = 77
 
 PLANS = {
     "p15": {"name": "🥉 برونزية", "price": 15, "daily": 5, "days": 15},
@@ -29,8 +30,10 @@ def plans_keyboard():
     return {"keyboard": buttons, "resize_keyboard": True}
 
 def pay_keyboard(plan_key):
+    stars = PLANS[plan_key]["price"] * STARS_RATE
     return {
         "inline_keyboard": [
+            [{"text": f"⭐ دفع {stars} نجمة (فوري)", "callback_data": f"stars_{plan_key}"}],
             [{"text": "🔗 Binance (BEP-20)", "callback_data": f"binance_{plan_key}"}],
             [{"text": "🟢 TRX (TRC-20)", "callback_data": f"trx_{plan_key}"}],
             [{"text": "🔙 رجوع", "callback_data": "back_plans"}]
@@ -65,16 +68,17 @@ while True:
         for upd in r.get("result", []):
             offset = upd["update_id"] + 1
             
-            # معالجة الرسائل النصية
+            # --- معالجة الرسائل ---
             if "message" in upd:
                 chat_id = upd["message"]["chat"]["id"]
                 uid = upd["message"]["from"]["id"]
                 text = upd["message"].get("text", "")
                 
+                # التحقق من حالة الانتظار (TxID)
                 if uid in user_states:
-                    del user_states[uid]
-                    send_message(chat_id, "✅ تم استلام إثبات الدفع، سيتم التفعيل بعد المراجعة.", main_keyboard())
-                    send_message(ADMIN_ID, f"🔔 *إيداع جديد*\n👤 `{uid}`\n🔖 {text}")
+                    plan = user_states.pop(uid)
+                    send_message(chat_id, "✅ *تم استلام إثبات الدفع*\nسيتم مراجعة التحويل وتفعيل اشتراكك قريباً.", main_keyboard())
+                    send_message(ADMIN_ID, f"🔔 *إيداع جديد*\n👤 `{uid}`\n📦 {PLANS[plan]['name']}\n🔖 الإثبات: {text}")
                     continue
                 
                 if text == "/start":
@@ -91,7 +95,7 @@ while True:
                 elif text == "💼 محفظتي":
                     send_message(chat_id, "💼 *محفظتك*\n💰 الرصيد: $0.00", main_keyboard())
             
-            # معالجة الأزرار المضمنة
+            # --- معالجة الأزرار ---
             elif "callback_query" in upd:
                 cb = upd["callback_query"]
                 cb_id = cb["id"]
@@ -102,13 +106,36 @@ while True:
                 
                 if data == "back_plans":
                     edit_message(chat_id, msg_id, "📦 *اختر خطة الاشتراك:*", plans_keyboard())
+                
                 elif data.startswith("binance_") or data.startswith("trx_"):
                     method, plan = data.split("_")
                     addr = BINANCE_ADDRESS if method == "binance" else TRX_ADDRESS
                     net = "BEP-20" if method == "binance" else "TRC-20"
-                    edit_message(chat_id, msg_id, f"🔗 *إيداع {method.capitalize()}*\n\n📌 أرسل ${PLANS[plan]['price']} إلى:\n`{addr}`\n\n🌐 الشبكة: {net}\n\n⚠️ بعد التحويل أرسل *TxID* هنا:")
-                    user_states[uid] = plan
+                    edit_message(chat_id, msg_id, f"🔗 *إيداع {method.capitalize()}*\n\n📌 أرسل ${PLANS[plan]['price']} إلى:\n`{addr}`\n\n🌐 الشبكة: {net}\n\n⚠️ *بعد التحويل، أرسل TxID هنا:*")
+                    user_states[uid] = plan # تفعيل وضع الانتظار
+                
+                elif data.startswith("stars_"):
+                    plan = data.split("_")[1]
+                    p = PLANS[plan]
+                    stars = p["price"] * STARS_RATE
+                    # إرسال فاتورة النجوم
+                    requests.post(f"{API_URL}/sendInvoice", json={
+                        "chat_id": chat_id, "title": f"{p['name']}", "description": f"اشتراك {p['name']} لمدة {p['days']} يوم",
+                        "payload": f"sub_{plan}", "currency": "XTR", "prices": [{"label": "سعر", "amount": stars}]
+                    })
+                
                 answer_cb(cb_id)
+                
+            # --- معالجة الدفع بالنجوم ---
+            elif "pre_checkout_query" in upd:
+                pcq_id = upd["pre_checkout_query"]["id"]
+                requests.post(f"{API_URL}/answerPreCheckoutQuery", json={"pre_checkout_query_id": pcq_id, "ok": True})
+                
+            elif "message" in upd and "successful_payment" in upd["message"]:
+                chat_id = upd["message"]["chat"]["id"]
+                payload = upd["message"]["successful_payment"]["invoice_payload"]
+                plan = payload.split("_")[1]
+                send_message(chat_id, f"✅ *تم الدفع بنجاح!*\n📦 تم تفعيل {PLANS[plan]['name']}.\n🎉 شكراً لك!", main_keyboard())
                 
         time.sleep(0.5)
     except Exception as e:
